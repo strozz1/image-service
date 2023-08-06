@@ -1,7 +1,8 @@
 use std::fs;
 
-use actix_web::{post, web, App, HttpResponse, HttpServer, Responder};
-use std::time::Instant;
+use actix_files::NamedFile;
+use actix_files::Files;
+use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, get, HttpRequest, FromRequest, http::header::{ContentType, ContentDisposition}};
 mod error;
 mod response;
 mod service;
@@ -25,8 +26,10 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(|| {
         App::new()
-            .service(upload_image)
-            .app_data(web::PayloadConfig::new(50_242_880))
+        .service(upload_image)
+        .service(get_media)
+        .service(Files::new("/static",".").prefer_utf8(true))
+        .app_data(web::PayloadConfig::new(50_242_880))
     })
     .bind(&address)
     .unwrap_or_else(|err| {
@@ -39,6 +42,20 @@ async fn main() -> std::io::Result<()> {
     .await
 }
 
+
+/// Retrieves a media file from the server by id param
+#[get("api/get")]
+async fn get_media(request: HttpRequest) -> impl Responder{
+       let result: Result<NamedFile, error::Error> = service::get_media(&request).await;
+        match result{
+            Ok(file) => {
+                
+                file.into_response(&request)
+               
+            },
+            Err(err) => HttpResponse::BadRequest().json(err)
+        }
+}
 
 /// Uploads an image to the server
 /// If upload was successfull returns a json Response object with image id
@@ -55,7 +72,6 @@ async fn upload_image(media: web::Bytes) -> impl Responder {
 
 
 fn create_folders(data_root: &String) {
-    //TODO create folders
     let root= format!("{}/images",data_root);
     match fs::create_dir(&root) {
         Ok(_) => println!("Folder '{}' created successfully.",root),

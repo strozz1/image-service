@@ -3,9 +3,17 @@ use std::time::Instant;
 use super::error::Error;
 use super::error::ErrorType;
 use super::response::Response;
+use actix_web::HttpRequest;
+use actix_web::web;
 use rand::{distributions::Alphanumeric, Rng};
+use serde::Deserialize;
+use serde::Serialize;
 use std::iter;
+use image::io::Reader as ImageReader;
 use image::{DynamicImage,ImageError};
+
+
+use actix_files::NamedFile;
 
 
 pub fn upload(buffer: &Vec<u8>,root: String) -> Result<Response, Error> {
@@ -41,6 +49,40 @@ pub fn upload(buffer: &Vec<u8>,root: String) -> Result<Response, Error> {
         }),
         Err(err)=> Err(Error { code: 5, reason: format!("{:?}",err) })
     } 
+}
+
+
+
+#[derive(Serialize,Deserialize)]
+pub struct Params{
+    id: String
+} 
+
+pub async fn get_media(request: &HttpRequest)-> Result<NamedFile,Error>{
+    let value = web::Query::<Params>::from_query(request.query_string());
+
+    match value {
+        Ok(query) => {
+            let id= query.0;
+            let path = format!("{}/{}",get_path(),id.id);
+            let file_result = NamedFile::open_async(path).await;
+
+            match file_result{
+                Ok(file)=>Ok(file),
+                Err(err)=> Err(Error{code:5,reason: err.to_string()})
+            }
+        },
+        Err(e) => Err(Error { code: 5, reason: e.to_string() }),
+    }
+
+}
+
+
+
+fn get_path()-> String{
+    
+   let root = std::env::var("ROOT").expect("Environment variable 'ROOT' not found!.");
+    root+"/images"
 }
 
 
