@@ -1,0 +1,18 @@
+host = "localhost"
+port = 1010
+storage_path = "E:/root"
+
+[broker_config]
+host= "localhost"
+port= 5672
+user= "guest"
+password= ""
+queue="queue"
+
+[db_config]
+host = "localhost"
+port = 5432
+db = "test"
+table = "media"
+user = "user"
+password = "test"

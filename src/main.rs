@@ -1,42 +1,57 @@
-use std::fs;
-
 use actix_files::NamedFile;
-use actix_files::Files;
-use actix_web::http::header::USER_AGENT;
-use actix_web::http::uri::Port;
-use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, get, HttpRequest, http::header::{ContentType, ContentDisposition}};
-use repository::MediaRepository;
-use serde_json::to_string;
+use actix_web::{
+    get,
+    web::{self, Data},
+    App, HttpRequest, HttpResponse, HttpServer, Responder,
+};
+use config::{Config, FileFormat};
+use configurations::AppConfig;
+use core::panic;
+use image::EncodableLayout;
+use lapin::{
+    options::{BasicPublishOptions, QueueDeclareOptions},
+    types::FieldTable,
+    BasicProperties, Connection, ConnectionProperties,
+};
+use service::Service;
+use std::sync::Mutex;
+mod broker;
+mod configurations;
 mod error;
+mod media;
+mod repository;
 mod response;
 mod service;
-mod repository;
-mod media;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    //load env variables
-    dotenv::dotenv().ok();
     env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
 
+    //get config from .toml file
+    let app_config = get_app_config();
 
+    //create new service with the config imported
+    let service_result = Service::new(app_config.clone()).await;
+    let service = match service_result {
+        Ok(service) => service,
+        Err(e) => panic!("Error creating the media service: {}", e),
+    };
 
-    let port = std::env::var("PORT").expect("Environment variable 'PORT' not found!.");
-    let host = std::env::var("HOST").expect("Environment variable 'HOST' not found!.");
-    let data_root = std::env::var("ROOT").expect("Environment variable 'ROOT' not found!.");
-    let address = format!("{}:{}", host, port);
-
-    service::create_folders(&data_root);
-    
-    let media_repo = connect_database().await;
-    
-
+    let address = format!("{}:{}", &app_config.host, &app_config.port);
     println!("Media-service started at address {}.", &address);
-    HttpServer::new(|| {
+
+    service.create_storage_folders();
+    service.initialize_broker().await;
+
+    let data = Data::new(Mutex::new(service));
+    
+    HttpServer::new(move || {
         App::new()
-        .service(upload_image)
-        .service(get_media)
-        .app_data(web::PayloadConfig::new(50_242_880))
+            .app_data(Data::clone(&data))
+            .service(root)
+            .service(get_media)
+            .service(publish)
+            .app_data(web::PayloadConfig::new(50_242_880))
     })
     .bind(&address)
     .unwrap_or_else(|err| {
@@ -49,62 +64,88 @@ async fn main() -> std::io::Result<()> {
     .await
 }
 
+#[get("/api")]
+async fn root() -> impl Responder {
+    HttpResponse::Ok().body("root directory")
+}
 
 /// Retrieves a media file from the server by id param
 #[get("api/get")]
-async fn get_media(request: HttpRequest) -> impl Responder{
-       let result: Result<NamedFile, error::Error> = service::get_media(&request).await;
-        match result{
-            Ok(file) => {
-                
-                file.into_response(&request)
-               
-            },
-            Err(err) => HttpResponse::BadRequest().json(err)
-        }
-}
+async fn get_media(request: HttpRequest, service: Data<Mutex<Service>>) -> impl Responder {
+    let service = service.lock().unwrap(); // unwrap service
+    let result: Result<NamedFile, error::Error> = service.get_media(&request).await;
 
-/// Uploads an image to the server
-/// If upload was successfull returns a json Response object with image id
-#[post("/api/upload")]
-async fn upload_image(media: web::Bytes) -> impl Responder {
-    let root = std::env::var("ROOT").expect("Environment variable 'ROOT' not found!.");
-    let result = service::upload(&media.to_vec(),root);
     match result {
-        Ok(response) => HttpResponse::Ok().json(response),
-        Err(error) => HttpResponse::NotAcceptable().json(error),
+        Ok(file) => file.into_response(&request),
+        //TODO error types
+        Err(err) => HttpResponse::BadRequest().json(err),
     }
+}
+
+/// Uploads an image to the server. This method listens to a messageQ waiting for new insert or update requests
+// async fn upload_image(media: web::Bytes, service: Data<Mutex<Service>>) -> impl Responder {
+//     let service = service.lock().unwrap(); // unwrap service
+    
+//     let result = service.upload(&media.to_vec());
+//     match result {
+//         Ok(response) => HttpResponse::Ok().json(response),
+//         Err(error) => HttpResponse::NotAcceptable().json(error),
+//     }
+// }
+
+async fn tmp() -> Result<(), lapin::Error> {
+    let address = "amqp://guest:guest@localhost:5672";
+    let con = Connection::connect(&address, ConnectionProperties::default()).await?;
+
+
+    let file_data = std::fs::read("E:/root/images/3rst24mFeWHDWkpzcl1X.jpg")?;
+    let channel = con.create_channel().await?;
+
+    let _ = channel
+        .queue_declare(
+            "queue",
+            QueueDeclareOptions::default(),
+            FieldTable::default(),
+        )
+        .await?;
+
+    channel
+        .basic_publish(
+            "",
+            "queue",
+            BasicPublishOptions::default(),
+            file_data.as_bytes(),
+            BasicProperties::default(),
+        )
+        .await?;
+    con.close(0, "Cierre de la conexión").await?;
+
+    println!("Archivo enviado a la cola con éxito!");
+    Ok(())
+}
+
+///Tries deserilizing the app configuration struct from the file specified in the add_source method and returns a AppConf struct with all the app configuration params.
+/// Panics if error occurred.
+pub fn get_app_config() -> AppConfig {
+    let config: Config = Config::builder()
+        .add_source(config::File::new("app-config", FileFormat::Toml))
+        .build()
+        .expect("Error loading the app configuration");
+    let app_config = config
+        .try_deserialize::<AppConfig>()
+        .expect("Error deserializing the app configuration.");
+    app_config
 }
 
 
 
-
-
-async fn connect_database() -> MediaRepository {
-
-    let host = std::env::var("DB_HOST").expect("Environment variable 'DB_HOST' not found!.");
-    let name = std::env::var("DB_NAME").expect("Environment variable 'DB_NAME' not found!.");
-    let table = std::env::var("DB_TABLE").expect("Environment variable 'DB_HOST' not found!.");
-    let password = std::env::var("DB_PASSWORD").expect("Environment variable 'DB_PASSWORD' not found!.");
-    let user = std::env::var("DB_USER").expect("Environment variable 'DB_USER' not found!.");
-    let port = std::env::var("DB_PORT").expect("Environment variable 'DB_PORT' not found!.").parse::<u16>().expect("The port must be INT type");
-
-
-    let result= MediaRepository::new(host,port,user,password,name,table).await;
-    match result{
-        Ok(mut media) =>{
-            let is_alive= media.is_alive();
-            
-            match is_alive{
-                true=>{
-                    println!("DATABASE: the database is online and ready for receiving connections.");
-                    media
-                },
-                false=>panic!("The database is not alive."),
-            }
-        },
-        Err(error)=>panic!("{}",error),
+#[get("/api/publish")]
+async fn publish() -> impl Responder {
+    let res = tmp().await;
+    match res {
+        Ok(_) => {}
+        Err(e) => println!("{}", e),
     }
-   
-}
 
+    HttpResponse::Ok().body("published")
+}
