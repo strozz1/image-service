@@ -4,10 +4,11 @@ storage_path = "E:/root"
 
 [broker_config]
 host= "localhost"
-port= 5672
+port= 9092
 user= "guest"
 password= ""
-queue="queue"
+topic="topical"
+group="multimedia"
 
 [db_config]
 host = "localhost"

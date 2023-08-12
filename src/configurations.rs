@@ -16,7 +16,8 @@ pub struct BrokerConfig{
     pub port: u16,
     pub user: String,
     pub password: String,
-    pub queue: String
+    pub topic: String,
+    pub group: String
 }
 
 

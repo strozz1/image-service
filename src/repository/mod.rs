@@ -1,99 +1,89 @@
-use super::media::Media;
-use core::panic;
 use std::time::Duration;
-use tokio_postgres::{Client, Config, Error, NoTls};
-use lazy_static::lazy_static;
-#[derive(Debug)]
+
+use super::media::Media;
+use crate::configurations::DatabaseConfig;
+use deadpool::unmanaged::PoolError;
+use deadpool_postgres::Pool;
+use log::{error, info};
+use tokio_postgres::Error;
+
+#[derive(Debug, Clone)]
 pub struct MediaRepository {
-    pub client: Client,
+    pub pool: Pool,
     pub db_name: String,
     pub db_table: String,
 }
 
 impl MediaRepository {
-
-    
-    pub async fn new(
-        db_host: String,
-        port: u16,
-        user: String,
-        password: String,
-        db_name: String,
-        db_table: String,
-    ) -> Result<Self, Error> {
-        let mut config = Config::new();
-
-        config
-            .host(db_host.as_str())
-            .port(port)
-            .user(user.as_str())
-            .password(password.as_str())
-            .dbname(db_name.as_str())
-            .connect_timeout(Duration::from_secs(5));
-
-        let (client, connection) = config.connect(NoTls).await?; //TODO tls security
-
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
-            }
-        });
-        
-        Ok(MediaRepository {
-            client,
-            db_name,
-            db_table,
-        })
+    pub fn new(pool: Pool, db_config: DatabaseConfig) -> Self {
+        MediaRepository {
+            pool,
+            db_name: db_config.db,
+            db_table: db_config.table,
+        }
     }
 
-    pub async fn search(&mut self, id: String) -> Result<Media, Error> {
+    pub async fn search(&mut self, id: String) -> Result<Media, Box<dyn std::error::Error>> {
         let query_string = format!(
             "SELECT id, path FROM {} WHERE id = '{}';",
             self.db_table, id
         );
+        info!("Postgres: processing query to database: {}", &query_string);
 
-        println!("DATABASE: Processing query to database: {}", &query_string);
+        let client = self.pool.get().await?;
+        let row = client.query_one(query_string.as_str(), &[]).await?;
 
-        let result = self.client.query_one(query_string.as_str(), &[]).await;
+        let id: String = row.get("id");
+        let path: String = row.get("path");
+        let media = Media { id, path };
 
-        match result {
-            Ok(row) => {
-                let id: String = row.get("id");
-                let path: String = row.get("path");
-
-                let media = Media { id, path };
-
-                println!("DATABASE: row returned correctly: {}", media);
-                Ok(media)
-            }
-            Err(err) => panic!("{}", err),
-        }
+        info!("Postgres: row returned correctly: {}", media);
+        Ok(media)
     }
 
     /// check if the connection with the database is still alive.
-    /// Timeout time is 5 secs
-    pub fn is_alive(&mut self) -> bool {
-        let result = self.client.is_closed();
-        match result {
-            true => false,
-            false => true,
-        }
+    pub fn check_db_connection(&self) {
+        let pool2 = self.pool.clone();
+        tokio::spawn(async move {
+            
+            println!("Connection with database is still up!.");
+            loop {
+                let result = pool2.get().await;
+                match result {
+                    Ok(con) => {
+                        if !con.is_closed() {
+                            println!("Connection with database is still up!.");
+                        } else {
+                            error!("Connection with database is down");
+                        }
+                    }
+                    Err(e) => error!("Error getting connection: {}", e),
+                };
+
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+        });
     }
 
     ///Save a media object to the database
-    pub async fn save(&self, media: Media) -> Result<String, Error> {
+    pub async fn save(&self, media: Media) -> Result<String, Box<dyn std::error::Error>> {
         let query_string = format!(
             "INSERT INTO {} (id, path) VALUES ('{}', '{}');",
             self.db_table, media.id, media.path
         );
-        let result = self.client.execute(&query_string, &[]).await;
-        match result {
-            Ok(_) => {
-                //TODO what if rows == 0
-                println!("DATABASE: Media saved in database: {}", media);
-                Ok(media.id)
-            }
-            Err(err) => Err(err),
-        }
+
+        info!("Postgres: processing query to database: {}", &query_string);
+
+        let client = self.pool.get().await;
+        let client = match client {
+            Ok(o) => o,
+            Err(e) => panic!("Error: {}", e),
+        };
+        let rows = client.execute(&query_string, &[]).await?;
+        info!(
+            "Postgres: Multimedia data saved in database: {}. Rows modified: {}",
+            media, rows
+        );
+        Ok(media.id)
     }
 }

@@ -1,5 +1,5 @@
 # Media service
-This is the GitHub project for the media service.
+This is the GitHub project for the multimedia service.
 > Service still on development
 
 This service is one of the many microservices related to the main project: [Blog](https://github.com/strozz1/Blog).
@@ -30,22 +30,25 @@ We will discuss the principal flow of the service and how it works.
 
 We are using a queue in this post operation because we want to apply some reliability on our system. By using an external queue, we ensure that we dont loose media files if the multimedia service is down. This way, the queue saves the data for when the service is ready again and the consumers are ready for fetching the stored messages (in this case binary files).
 
-The architecture queue we are using is RabbitMQ. 
+The technology queue we are using is Kafka. 
 
 This way when the client ask to upload a file, the main server does not have to wait until the file is upload. It will send the file to the queue and continue doing other tasks.
 This saves huges amounts of time on computation and in executing requests.
+
+Now that the server has sent a binary file it would be nice if the server new whats the id of the persisted file, in case it needs it.
+
 
 # Endpoints 
 There are few endpoints for consuming the API and they will be discussed and explained.
 
 |Endpoints|Type| Response Type
 |--|--|--|
-| /api/find | get/ | media file
+| /api/get | get/ | media file
 | /api/upload | post/ | json
 | /api/update | post/ | json
 | /api/list | get/ | media file
 
-## Endpoint - /api/find
+## Endpoint - /api/get
 **- Http Get operation**
 
 This endpoint requires a parameter, the **id** of the file you want to retrieve.
@@ -53,7 +56,7 @@ This endpoint requires a parameter, the **id** of the file you want to retrieve.
 
 This parameter is required in the url, as showed above
 
-    http://server.address/api/find?id=id_string
+    http://server.address/api/get?id=id_string
 
 
 The server will search for this id in the database and get the path of the file and provide such file as a response.

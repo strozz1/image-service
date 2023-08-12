@@ -1,0 +1,8 @@
+docker-compose kafka-broker-1 up
+
+docker -exec it kafka-broker-1 bash
+
+
+run productor: kafka-console-producer --bootstrap-server kafka-broker-1:9092 --topic topical --property "parse.key=true" --property "key.separator=:"
+
+run consume:  kafka-console-consumer --bootstrap-server kafka-broker-1:9092 --topic topical --from-beginning

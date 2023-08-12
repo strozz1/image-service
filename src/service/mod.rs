@@ -1,126 +1,64 @@
-use crate::media::Media;
-
-use super::broker::Broker;
 use super::configurations::AppConfig;
-use super::error::Error;
-use super::error::ErrorType;
-use super::get_app_config;
 use super::repository::MediaRepository;
-use super::response::Response;
-
+use super::broker::Broker;
 use actix_files::NamedFile;
 use actix_web::web;
 use actix_web::HttpRequest;
-use image::{DynamicImage, ImageError};
-use rand::{distributions::Alphanumeric, Rng};
+use image::ColorType;
+use log::{error, info};
+use rand::distributions::Alphanumeric;
+use rand::Rng;
+use rdkafka::error::KafkaError;
 use serde::Deserialize;
 use serde::Serialize;
+use std::error;
 use std::fs;
 use std::iter;
-use std::time::Instant;
 
+
+///Parameters from the url
 #[derive(Serialize, Deserialize)]
 pub struct Params {
     id: String,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Service {
     pub config: AppConfig,
-    pub repo: MediaRepository,
+    pub repository: MediaRepository,
+    pub broker: Broker,
 }
 
 impl Service {
-    pub async fn new(config: AppConfig) -> Result<Self, postgres::Error> {
-        //create connection to db and create storage folders
-        let repo = Service::create_db_connection(config.clone()).await?;
-
-        Ok(Service { config, repo })
-    }
-
-    pub async fn initialize_broker(&self) {
-        let broker = Broker::new(self.config.broker_config.clone(), 5);
-        println!("Broker initilized");
-        let conn = if let Ok(conn) = broker.connect().await {
-            conn
-        } else {
-            panic!("Cant connect to the message Queue");
-        };
-
-        println!("Connection stablished with the messageQ");
-        println!("Generating consumers...");
-        //broker.process_method(self, upload);
-        let generate = broker.generate_consumers(&conn).await;
-        match generate {
-            Ok(_) => (),
-            Err(e) => panic!("{}", e),
+    pub async fn new(config: AppConfig, repository: MediaRepository) -> Self {
+        let broker = Broker::new(repository.clone(), config.clone(), 5);
+        Service {
+            config,
+            repository,
+            broker,
         }
     }
 
-    ///upload an image data to the database and saves it in the file system
-    pub async fn upload(&self, buffer: &Vec<u8>) -> Result<Response, Error> {
-        //TODO refactor code
-        let start_time = Instant::now();
-        let id = self.generate_id();
-        
-        let image: Option<DynamicImage> = match image::load_from_memory(&buffer) {
-            Ok(image) => Some(image),
-            Err(_) => None,
-        };
-        let result: DynamicImage = match image {
-            Some(im) => im,
-            None => return Err(Error::from(ErrorType::ErrorParsingFile)),
-        };
-        
-        let extention = self.generate_extention(&result);
-        let path = format!("{}/images/{}.{}", self.config.storage_path, &id, extention);
-        println!("Saving file in path: {}.", &path);
-
-
-        let save = self.repo.save(Media { id:id.clone(), path: path.clone() }).await;
-        match save{
-            Ok(idi)=>println!("ID new media: {}",idi),
-            Err(e)=> println!("Error {}",e)
-        };
-        let res: Result<(), ImageError> = result.save(&path);
-
-        let end_time = Instant::now();
-        let duration = (end_time - start_time).as_millis();
-
-        match res {
-            Ok(_) => Ok(Response {
-                image_id: id,
-                path,
-                message: "File uploaded successfully to the server".to_string(),
-                duration,
-            }),
-            Err(err) => Err(Error {
-                code: 5,
-                reason: format!("{:?}", err),
-            }),
-        }
+    ///Initialize broker and create subscribers for incoming messages
+    pub fn initialize_broker(&self) -> Result<(), KafkaError> {
+        self.broker.generate_subscribers()?;
+        Ok(())
     }
-    pub async fn get_media(&self, request: &HttpRequest) -> Result<NamedFile, Error> {
-        let value = web::Query::<Params>::from_query(request.query_string());
 
-        match value {
-            Ok(query) => {
-                let id = query.0;
-                let path = format!("{}/{}", self.get_path(), id.id);
-                let file_result = NamedFile::open_async(path).await;
+    pub async fn get_media(
+        &self,
+        request: &HttpRequest,
+    ) -> Result<NamedFile, Box<dyn error::Error>> {
+        let query = web::Query::<Params>::from_query(request.query_string())?;
 
-                match file_result {
-                    Ok(file) => Ok(file),
-                    Err(err) => Err(Error {
-                        code: 5,
-                        reason: err.to_string(),
-                    }),
-                }
-            }
-            Err(e) => Err(Error {
-                code: 5,
-                reason: e.to_string(),
-            }),
-        }
+        //TODO error handle
+        let id = query.0;
+        let media = self.repository.clone().search(id.id).await?;
+
+        let path = media.path.replace(|c: char| !c.is_ascii(), "");
+
+        let file_result = NamedFile::open_async(path).await?;
+
+        Ok(file_result)
     }
 
     pub fn get_path(&self) -> String {
@@ -129,54 +67,41 @@ impl Service {
         root + "/images"
     }
 
-    fn generate_id(&self) -> String {
+    pub fn create_storage_folders(&self) {
+        let path = self.get_path();
+        match fs::create_dir(&path) {
+            Ok(_) => {
+                info!("Folder '{}' created successfully.", path);
+                info!(
+                    "The data will be stored in the next path: {}.\nCreating folders...",
+                    &path
+                );
+            }
+            Err(err) => error!("Error creating folder: {:?}", err),
+        }
+    }
+
+    pub fn parse_path(id: &str, storage_path: &str, file_ext: &str) -> String {
+        format!("{}/{}.{}", storage_path, id, file_ext)
+    }
+    ///generate extention for file
+    pub fn generate_extention(format: &ColorType) -> String {
+        match format {
+            //TODO better extentions
+            image::ColorType::Rgb8 => "jpg".to_string(),
+            image::ColorType::Rgba8 => "png".to_string(),
+            _ => "png".to_string(),
+        }
+    }
+
+    ///generate random Id for multimedia file
+    pub fn generate_id() -> String {
         let mut rng = rand::thread_rng();
         let rand_string: String = iter::repeat(())
             .map(|()| rng.sample(Alphanumeric) as char) // Convert u8 to char
             .take(20)
             .collect();
         rand_string
-    }
-
-    fn generate_extention(&self, image: &DynamicImage) -> String {
-        let format = image.color();
-
-        match format {
-            image::ColorType::Rgb8 => "jpg".to_string(),
-            image::ColorType::Rgba8 => "png".to_string(),
-            _ => "png".to_string(),
-        }
-    }
-    pub fn create_storage_folders(&self) {
-        let path = self.get_path();
-        match fs::create_dir(&path) {
-            Ok(_) => {
-                println!("Folder '{}' created successfully.", path);
-                println!(
-                    "The data will be stored in the next path: {}.\nCreating folders...",
-                    &path
-                );
-            }
-            Err(err) => eprintln!("Error creating folder: {:?}", err),
-        }
-    }
-
-    /// Connects to the database
-    async fn create_db_connection(config: AppConfig) -> Result<MediaRepository, postgres::Error> {
-        let db_conf = config.db_config;
-
-        let repository = MediaRepository::new(
-            db_conf.host,
-            db_conf.port,
-            db_conf.user,
-            db_conf.password,
-            db_conf.db,
-            db_conf.table,
-        )
-        .await?;
-        println!("DATABASE: Connected to the database successfuly");
-        println!("DATABASE: Database ready for receiving querys");
-        Ok(repository)
     }
 
     // Crea una instancia estática de Database utilizando lazy_static

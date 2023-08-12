@@ -1,4 +1,3 @@
-use actix_files::NamedFile;
 use actix_web::{
     get,
     web::{self, Data},
@@ -7,18 +6,16 @@ use actix_web::{
 use config::{Config, FileFormat};
 use configurations::AppConfig;
 use core::panic;
-use image::EncodableLayout;
-use lapin::{
-    options::{BasicPublishOptions, QueueDeclareOptions},
-    types::FieldTable,
-    BasicProperties, Connection, ConnectionProperties,
-};
+use log::{error, info};
+use poolmanager::PoolManager;
+use repository::MediaRepository;
 use service::Service;
 use std::sync::Mutex;
+
 mod broker;
 mod configurations;
-mod error;
 mod media;
+mod poolmanager;
 mod repository;
 mod response;
 mod service;
@@ -30,21 +27,31 @@ async fn main() -> std::io::Result<()> {
     //get config from .toml file
     let app_config = get_app_config();
 
-    //create new service with the config imported
-    let service_result = Service::new(app_config.clone()).await;
-    let service = match service_result {
-        Ok(service) => service,
-        Err(e) => panic!("Error creating the media service: {}", e),
-    };
-
     let address = format!("{}:{}", &app_config.host, &app_config.port);
-    println!("Media-service started at address {}.", &address);
+    info!("Multimedia-service started at address {}.", &address);
+
+    //create new service with the config imported
+    let manager = PoolManager::get_db_manager(app_config.db_config.clone()).await;
+    let pool = PoolManager::get_pool(manager).unwrap();
+
+    //init the repo and the service
+    let repository = MediaRepository::new(pool, app_config.db_config.clone());
+
+
+    let service = Service::new(app_config.clone(), repository.clone()).await;
 
     service.create_storage_folders();
-    service.initialize_broker().await;
 
-    let data = Data::new(Mutex::new(service));
-    
+    let init_result = service.initialize_broker();
+
+    if let Err(e) = init_result {
+        error!("Error initializing the broker: {}", e);
+        panic!();
+    } else {
+        info!("Broker initilized correctly.");
+    }
+
+    let data = Data::new(Mutex::new(service.clone()));
     HttpServer::new(move || {
         App::new()
             .app_data(Data::clone(&data))
@@ -72,56 +79,37 @@ async fn root() -> impl Responder {
 /// Retrieves a media file from the server by id param
 #[get("api/get")]
 async fn get_media(request: HttpRequest, service: Data<Mutex<Service>>) -> impl Responder {
-    let service = service.lock().unwrap(); // unwrap service
-    let result: Result<NamedFile, error::Error> = service.get_media(&request).await;
+    let service = service.lock().expect("error"); // unwrap service
+
+    let result = service.get_media(&request).await;
 
     match result {
         Ok(file) => file.into_response(&request),
         //TODO error types
-        Err(err) => HttpResponse::BadRequest().json(err),
+        Err(err) => {
+            if err.is::<tokio_postgres::Error>() {
+                //TODO handle error
+                let db_error: &tokio_postgres::Error =
+                    err.downcast_ref::<tokio_postgres::Error>().unwrap();
+                if let Some(_) = db_error.code() {
+                    error!("Database error: {}", db_error);
+                    HttpResponse::InternalServerError()
+                        .json(format!("Database error: {}", db_error))
+                } else {
+                    HttpResponse::NotFound().json(format!("Database error: id not found"))
+                }
+            } else if err.is::<std::io::Error>() {
+                let io_error: &std::io::Error = err.downcast_ref::<std::io::Error>().unwrap();
+                HttpResponse::NotFound().json(format!("IO error: {}", io_error.to_string()))
+            } else if err.is::<actix_web::error::QueryPayloadError>() {
+                HttpResponse::BadRequest().json(format!("Query error: {}", err.to_string()))
+            } else {
+                error!("Unexpected error: {}", err);
+                HttpResponse::InternalServerError()
+                    .json(format!("Unexpected error: {}", err.to_string()))
+            }
+        }
     }
-}
-
-/// Uploads an image to the server. This method listens to a messageQ waiting for new insert or update requests
-// async fn upload_image(media: web::Bytes, service: Data<Mutex<Service>>) -> impl Responder {
-//     let service = service.lock().unwrap(); // unwrap service
-    
-//     let result = service.upload(&media.to_vec());
-//     match result {
-//         Ok(response) => HttpResponse::Ok().json(response),
-//         Err(error) => HttpResponse::NotAcceptable().json(error),
-//     }
-// }
-
-async fn tmp() -> Result<(), lapin::Error> {
-    let address = "amqp://guest:guest@localhost:5672";
-    let con = Connection::connect(&address, ConnectionProperties::default()).await?;
-
-
-    let file_data = std::fs::read("E:/root/images/3rst24mFeWHDWkpzcl1X.jpg")?;
-    let channel = con.create_channel().await?;
-
-    let _ = channel
-        .queue_declare(
-            "queue",
-            QueueDeclareOptions::default(),
-            FieldTable::default(),
-        )
-        .await?;
-
-    channel
-        .basic_publish(
-            "",
-            "queue",
-            BasicPublishOptions::default(),
-            file_data.as_bytes(),
-            BasicProperties::default(),
-        )
-        .await?;
-    con.close(0, "Cierre de la conexión").await?;
-
-    println!("Archivo enviado a la cola con éxito!");
-    Ok(())
 }
 
 ///Tries deserilizing the app configuration struct from the file specified in the add_source method and returns a AppConf struct with all the app configuration params.
@@ -137,15 +125,7 @@ pub fn get_app_config() -> AppConfig {
     app_config
 }
 
-
-
 #[get("/api/publish")]
 async fn publish() -> impl Responder {
-    let res = tmp().await;
-    match res {
-        Ok(_) => {}
-        Err(e) => println!("{}", e),
-    }
-
-    HttpResponse::Ok().body("published")
+    HttpResponse::Ok().body("Publisher acted.")
 }
