@@ -1,3 +1,5 @@
+use crate::media::Media;
+
 use super::configurations::AppConfig;
 use super::repository::MediaRepository;
 use super::broker::Broker;
@@ -47,24 +49,20 @@ impl Service {
     pub async fn get_media(
         &self,
         request: &HttpRequest,
-    ) -> Result<NamedFile, Box<dyn error::Error>> {
+    ) -> Result<Media, Box<dyn error::Error>> {
         let query = web::Query::<Params>::from_query(request.query_string())?;
 
         //TODO error handle
         let id = query.0;
         let media = self.repository.clone().search(id.id).await?;
 
-        let path = media.path.replace(|c: char| !c.is_ascii(), "");
-
-        let file_result = NamedFile::open_async(path).await?;
-
-        Ok(file_result)
+        Ok(media)
     }
 
     pub fn get_path(&self) -> String {
         //TODO
         let root = self.config.storage_path.clone();
-        root + "/images"
+        root
     }
 
     pub fn create_storage_folders(&self) {

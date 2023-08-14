@@ -1,3 +1,4 @@
+use actix_files::Files;
 use actix_web::{
     get,
     web::{self, Data},
@@ -58,6 +59,7 @@ async fn main() -> std::io::Result<()> {
             .service(root)
             .service(get_media)
             .service(publish)
+            .service(Files::new("/images", &app_config.storage_path).show_files_listing())
             .app_data(web::PayloadConfig::new(50_242_880))
     })
     .bind(&address)
@@ -84,7 +86,7 @@ async fn get_media(request: HttpRequest, service: Data<Mutex<Service>>) -> impl 
     let result = service.get_media(&request).await;
 
     match result {
-        Ok(file) => file.into_response(&request),
+        Ok(media) => HttpResponse::Ok().json(media),
         //TODO error types
         Err(err) => {
             if err.is::<tokio_postgres::Error>() {
